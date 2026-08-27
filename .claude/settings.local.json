@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "PowerShell(winget --version)",
+      "PowerShell(winget install Python.Python.3.12)"
+    ]
+  }
+}
