@@ -285,7 +285,7 @@ def find_copilot_cli():
 
 
 def login_copilot(github_host=""):
-    """Mở OAuth device flow; SAML SSO được xác nhận trong trình duyệt."""
+    """Mở OAuth device flow và lưu token vào credential store của hệ điều hành."""
     try:
         command = [find_copilot_cli(), "login", "--device-code"]
         if github_host:
@@ -294,6 +294,50 @@ def login_copilot(github_host=""):
     except Exception as exc:
         print(f"[!] Không thể mở đăng nhập GitHub Copilot: {exc}")
         return 1
+
+
+async def get_copilot_auth_status():
+    """Đọc trạng thái OAuth hiện tại từ Copilot CLI/Windows Credential Manager."""
+    async with CopilotClient(use_logged_in_user=True) as copilot:
+        return await copilot.get_auth_status()
+
+
+def ensure_copilot_authenticated(github_host=""):
+    """Yêu cầu đăng nhập nếu chưa có credential hợp lệ, rồi kiểm tra lại."""
+    print("Đang kiểm tra đăng nhập GitHub Copilot...")
+
+    try:
+        status = asyncio.run(get_copilot_auth_status())
+    except Exception as exc:
+        print(f"[!] Không kiểm tra được trạng thái đăng nhập: {exc}")
+        return False
+
+    if status.isAuthenticated:
+        account = f" ({status.login})" if status.login else ""
+        print(f"Đã đăng nhập GitHub Copilot{account}.")
+        return True
+
+    print("Chưa đăng nhập GitHub Copilot.")
+    print("Hãy hoàn tất xác thực trong trình duyệt bằng mã được hiển thị bên dưới.")
+    if login_copilot(github_host) != 0:
+        print("[!] Xác thực không thành công hoặc đã bị hủy.")
+        return False
+
+    try:
+        status = asyncio.run(get_copilot_auth_status())
+    except Exception as exc:
+        print(f"[!] Không kiểm tra lại được trạng thái đăng nhập: {exc}")
+        return False
+
+    if not status.isAuthenticated:
+        detail = f": {status.statusMessage}" if status.statusMessage else "."
+        print(f"[!] GitHub Copilot vẫn chưa được xác thực{detail}")
+        return False
+
+    account = f" ({status.login})" if status.login else ""
+    print(f"Xác thực thành công{account}.")
+    print("Phiên đăng nhập đã được lưu an toàn; lần chạy sau sẽ tự sử dụng lại.")
+    return True
 
 
 def append_answer(text):
@@ -485,6 +529,9 @@ def main():
 
     if "--login" in sys.argv:
         return login_copilot(config.get("github_host", "").strip())
+
+    if not ensure_copilot_authenticated(config.get("github_host", "").strip()):
+        return 1
 
     screenshot_dir = resolve(config["screenshot_folder"])
     log_path = resolve(config["log_file"])

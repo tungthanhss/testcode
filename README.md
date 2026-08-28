@@ -33,6 +33,19 @@ Nếu tổ chức dùng GitHub Enterprise Cloud có data residency, điền host
 
 ## Chạy
 
+Nhấp đúp `run.bat` để chạy nhanh. File này tự dùng môi trường `venv`; nếu
+chưa có thì sẽ tạo môi trường và cài dependencies từ `vendor/wheels` có sẵn
+trong repository, hoàn toàn không tải thư viện từ PyPI. Bộ wheel hỗ trợ Windows
+x64 với Python 3.11 đến 3.14.
+
+Mỗi lần khởi động, ứng dụng kiểm tra trạng thái GitHub Copilot. Nếu chưa xác
+thực, ứng dụng mở OAuth device flow và yêu cầu hoàn tất đăng nhập. Token sau đó
+được Copilot CLI lưu an toàn trong Windows Credential Manager nên các lần chạy
+sau không cần đăng nhập lại. Kết nối Internet vẫn cần thiết để xác thực GitHub,
+tải Copilot CLI runtime ở lần đầu và gửi câu hỏi tới Copilot.
+
+Hoặc chạy trực tiếp bằng PowerShell:
+
 ```powershell
 .\venv\Scripts\python.exe main.py
 ```
