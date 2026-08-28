@@ -1,0 +1,17 @@
+# Hotkeys
+hotkey_capture = ctrl+mouseleft
+hotkey_send = ctrl+mouseright
+hotkey_paste = ctrl+mousemiddle
+hotkey_clear = ctrl+shift
+
+# GitHub Copilot Enterprise: no API key is stored here.
+# Leave blank for github.com + SAML SSO. For Enterprise Cloud with data
+# residency, enter the organization's hostname, for example company.ghe.com.
+model = gpt-5.4
+github_host =
+request_timeout = 120
+
+prompt = Đây là ảnh chụp màn hình một bài toán/câu hỏi. Hãy trả lời CHỈ đáp án cuối cùng.
+log_file = answers.log
+screenshot_folder = screenshots/
+typing_delay = 0.03

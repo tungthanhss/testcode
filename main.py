@@ -1,5 +1,5 @@
 """
-Tool luyện tập cá nhân: chụp màn hình -> hỏi DeepSeek Vision API -> lấy đáp án.
+Tool luyện tập cá nhân: chụp màn hình -> hỏi GitHub Copilot -> lấy đáp án.
 
 Chạy nền, lắng nghe global hotkey trên Windows bằng cách poll
 GetAsyncKeyState (ổn định hơn hook của thư viện `keyboard` khi chạy
@@ -8,7 +8,7 @@ qua Remote Desktop / máy cloud, nơi hook tầng thấp thường không bắt
 Mọi hành động đều im lặng (chỉ log ra console), không popup/toast.
 
     Ctrl + Click trái    Chụp màn hình, thêm vào hàng chờ ảnh
-    Ctrl + Click phải    Gửi TẤT CẢ ảnh trong hàng chờ lên DeepSeek Vision
+    Ctrl + Click phải    Gửi TẤT CẢ ảnh trong hàng chờ lên GitHub Copilot
     Ctrl + Click giữa    Gõ giả lập đáp án mới nhất vào cửa sổ đang focus
     Ctrl + Shift         Xoá sạch ảnh và xoá rỗng log_file
 
@@ -32,9 +32,11 @@ Citrix, Parsec...):
     can thiệp làm chớp tắt, khiến 2-3 phím không bao giờ "cùng nhấn".
 """
 
-import base64
+import asyncio
 import ctypes
 import os
+from pathlib import Path
+import subprocess
 import sys
 import threading
 import time
@@ -43,7 +45,7 @@ from datetime import datetime
 import keyboard  # chỉ dùng để gõ giả lập, không dùng để bắt hotkey
 import mss
 import mss.tools
-from openai import OpenAI
+from copilot import CopilotClient
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.txt")
 ENTRY_SEPARATOR = "---"
@@ -169,10 +171,10 @@ DEFAULTS = {
     "hotkey_send": "ctrl+mouseright",
     "hotkey_paste": "ctrl+mousemiddle",
     "hotkey_clear": "ctrl+shift",
-    "model": "deepseek-v4-flash-vision-exp",
-    "base_url": "https://api.deepseek.com",
-    "api_key": "",
+    "model": "gpt-5.4",
+    "github_host": "",
     "prompt": "Đây là ảnh chụp màn hình một bài toán/câu hỏi. Hãy trả lời CHỈ đáp án cuối cùng.",
+    "request_timeout": "120",
     "log_file": "answers.log",
     "screenshot_folder": "screenshots/",
     "typing_delay": "0.03",
@@ -209,8 +211,6 @@ typing_delay = 0.01
 pending_images = []          # hàng chờ: danh sách đường dẫn ảnh
 queue_lock = threading.Lock()
 api_lock = threading.Lock()  # đảm bảo chỉ 1 request API tại một thời điểm
-client = None
-
 typing_lock = threading.Lock()
 typing_active = False            # đang trong tiến trình gõ giả lập
 typing_cancel = threading.Event()  # bật lên để yêu cầu dừng gõ giữa chừng
@@ -248,14 +248,52 @@ def on_capture():
 
 
 # --------------------------------------------------------------------------- #
-# Gửi toàn bộ ảnh lên DeepSeek Vision API
+# Đăng nhập SSO và gửi ảnh lên GitHub Copilot
 # --------------------------------------------------------------------------- #
 
-def image_data_url(path):
-    """Đọc PNG và chuyển thành data URL để gửi trực tiếp tới vision model."""
-    with open(path, "rb") as image_file:
-        encoded = base64.b64encode(image_file.read()).decode("ascii")
-    return "data:image/png;base64," + encoded
+
+def find_copilot_cli():
+    """Tìm Copilot CLI do SDK tải về; tải runtime nếu máy chưa có."""
+    explicit_path = os.environ.get("COPILOT_CLI_PATH", "").strip()
+    if explicit_path and os.path.isfile(explicit_path):
+        return explicit_path
+
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    cache_root = Path(local_app_data) / "github-copilot-sdk" / "cli"
+
+    def cached_candidates():
+        if not cache_root.is_dir():
+            return []
+        return sorted(
+            cache_root.glob("*/copilot.exe"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+
+    candidates = cached_candidates()
+    if not candidates:
+        print("Đang tải GitHub Copilot CLI runtime...")
+        subprocess.run(
+            [sys.executable, "-m", "copilot", "download-runtime"],
+            check=True,
+        )
+        candidates = cached_candidates()
+
+    if not candidates:
+        raise FileNotFoundError("Không tìm thấy GitHub Copilot CLI runtime.")
+    return str(candidates[0])
+
+
+def login_copilot(github_host=""):
+    """Mở OAuth device flow; SAML SSO được xác nhận trong trình duyệt."""
+    try:
+        command = [find_copilot_cli(), "login", "--device-code"]
+        if github_host:
+            command.extend(["--host", github_host])
+        return subprocess.run(command, check=False).returncode
+    except Exception as exc:
+        print(f"[!] Không thể mở đăng nhập GitHub Copilot: {exc}")
+        return 1
 
 
 def append_answer(text):
@@ -273,49 +311,51 @@ def append_answer(text):
         f.write(text.rstrip() + "\n")
 
 
-def do_send(images):
-    if client is None:
-        # Chưa có api_key -> chế độ test, không gọi API thật
-        answer = (
-            f"[MOCK - chưa có API key] Giả lập đáp án cho {len(images)} ảnh, "
-            f"thời gian {datetime.now().strftime('%H:%M:%S')}"
-        )
-        append_answer(answer)
-        print(f"[TEST MODE] Đã 'gửi' {len(images)} ảnh, ghi đáp án giả vào log")
-        return
+async def ask_copilot(images):
+    """Tạo một phiên Copilot độc lập và trả về nội dung phản hồi cuối."""
+    attachments = [
+        {
+            "type": "file",
+            "path": os.path.abspath(path),
+            "displayName": os.path.basename(path),
+        }
+        for path in images
+    ]
+    timeout = float(config.get("request_timeout", "120"))
 
-    user_content = [{"type": "text", "text": config["prompt"]}]
-    for path in images:
-        user_content.append({
-            "type": "image_url",
-            "image_url": {"url": image_data_url(path)},
-        })
-
-    # API có thể trả 503 khi quá tải theo đợt -> thử lại vài lần
-    for attempt in range(3):
-        try:
-            response = client.chat.completions.create(
-                model=config["model"],
-                messages=[{"role": "user", "content": user_content}],
-                reasoning_effort="high",
-                extra_body={"thinking": {"type": "enabled"}},
+    async with CopilotClient(use_logged_in_user=True) as copilot:
+        async with await copilot.create_session(
+            model=config["model"],
+            available_tools=[],
+            enable_session_store=False,
+            infinite_sessions={"enabled": False},
+            memory={"enabled": False},
+        ) as session:
+            response = await session.send_and_wait(
+                config["prompt"],
+                attachments=attachments,
+                timeout=timeout,
             )
-            answer = (response.choices[0].message.content or "").strip()
 
-            if not answer:
-                print("[!] API trả về rỗng, không ghi log.")
-                return
+    if response is None:
+        return ""
+    return (getattr(response.data, "content", "") or "").strip()
 
-            append_answer(answer)
-            print(f"Đã gửi {len(images)} ảnh, nhận đáp án ({len(answer)} ký tự)")
+
+def do_send(images):
+    try:
+        answer = asyncio.run(ask_copilot(images))
+        if not answer:
+            print("[!] Copilot trả về rỗng, không ghi log.")
             return
-        except Exception as exc:
-            if "503" in str(exc) and attempt < 2:
-                print(f"[!] Model quá tải, thử lại lần {attempt + 2}/3...")
-                time.sleep(2)
-                continue
-            print(f"[!] Lỗi khi gọi API: {exc}")
-            return
+
+        append_answer(answer)
+        print(f"Đã gửi {len(images)} ảnh, nhận đáp án ({len(answer)} ký tự)")
+    except Exception as exc:
+        message = str(exc)
+        print(f"[!] Lỗi khi gọi GitHub Copilot: {message}")
+        if any(word in message.lower() for word in ("auth", "login", "credential", "401")):
+            print(f"[!] Hãy chạy: {sys.executable} {__file__} --login")
 
 
 def on_send():
@@ -430,7 +470,7 @@ def on_clear():
 # --------------------------------------------------------------------------- #
 
 def main():
-    global config, screenshot_dir, log_path, typing_delay, client
+    global config, screenshot_dir, log_path, typing_delay
 
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -442,6 +482,10 @@ def main():
         return 0
 
     config = load_config(CONFIG_PATH)
+
+    if "--login" in sys.argv:
+        return login_copilot(config.get("github_host", "").strip())
+
     screenshot_dir = resolve(config["screenshot_folder"])
     log_path = resolve(config["log_file"])
 
@@ -450,16 +494,6 @@ def main():
     except ValueError:
         typing_delay = 0.01
         print("[!] typing_delay không hợp lệ, dùng 0.01")
-
-    api_key = config["api_key"].strip()
-    if api_key:
-        client = OpenAI(
-            api_key=api_key,
-            base_url=config.get("base_url", "https://api.deepseek.com"),
-        )
-    else:
-        client = None
-        print("[!] Chưa điền api_key -> chạy ở TEST MODE (F7 sẽ ghi đáp án giả, không gọi API thật).")
 
     os.makedirs(screenshot_dir, exist_ok=True)
 

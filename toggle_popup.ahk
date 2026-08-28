@@ -34,12 +34,14 @@ TogglePopup(*) {
     popupW := 600
     popupH := 600
 
-    popupGui := Gui("+AlwaysOnTop +ToolWindow -Caption -Border", "Popup")
+    ; WS_EX_NOACTIVATE (0x08000000): không bao giờ lấy focus
+    ; WS_EX_TRANSPARENT (0x20): click xuyên qua popup xuống cửa sổ bên dưới
+    popupGui := Gui("+AlwaysOnTop +ToolWindow -Caption -Border +E0x08000020", "Popup")
     popupGui.BackColor := "263747"          ; nền tối, sẽ làm trong suốt bên dưới
     popupGui.SetFont("s10 cB2C0CC", "Consolas")
     popupGui.Add("Edit", "ReadOnly Multi VScroll -E0x200 x0 y0 w" (popupW + 17) " h" popupH " Background263747 cB2C0CC vTextBox", content)
 
-    ; Đóng popup khi mất focus (click ra ngoài)
+    ; Xử lý yêu cầu đóng popup
     popupGui.OnEvent("Escape", (*) => ClosePopup())
     popupGui.OnEvent("Close", (*) => ClosePopup())
 
@@ -47,7 +49,8 @@ TogglePopup(*) {
     posX := 10
     posY := (A_ScreenHeight - popupH) / 2
 
-    popupGui.Show(Format("x{} y{} w{} h{}", posX, posY, popupW, popupH))
+    ; NA (NoActivate): hiện popup nhưng không lấy focus khỏi cửa sổ hiện tại
+    popupGui.Show(Format("NA x{} y{} w{} h{}", posX, posY, popupW, popupH))
 
     ; Làm cả cửa sổ trong suốt (0 = trong suốt hoàn toàn, 255 = đục hoàn toàn)
     WinSetTransparent(210, popupGui.Hwnd)
@@ -69,7 +72,7 @@ ClosePopup() {
 ; Ctrl + nút Forward (XButton2)
 ^XButton2::TogglePopup()
 
-; Nhấn Esc để đóng popup nhanh (chỉ khi popup đang mở và có focus)
-#HotIf popupGui != "" && WinActive("ahk_id " (IsObject(popupGui) ? popupGui.Hwnd : 0))
+; Nhấn Esc để đóng popup nhanh dù focus vẫn nằm ở cửa sổ đang làm việc
+#HotIf popupGui != "" && IsObject(popupGui)
 Escape::ClosePopup()
 #HotIf
